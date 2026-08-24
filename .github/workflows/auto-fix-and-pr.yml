@@ -1,14 +1,11 @@
 name: Auto‑Fix & PR
 
-# -----------------------------------------------------------------
-# Triggers
-# -----------------------------------------------------------------
 on:
   pull_request:
-    branches: [ main ]          # run on PRs targeting main
+    branches: [ main ]          # adjust as needed
   push:
-    branches: [ main ]          # optional: also run on direct pushes to main
-  workflow_dispatch:            # <-- allows manual invocation from the UI
+    branches: [ main ]
+  workflow_dispatch:           # manual trigger
     inputs:
       ref:
         description: 'Git ref (branch, tag, or SHA) to check out'
@@ -32,12 +29,12 @@ jobs:
           fetch-depth: 0
 
       # -----------------------------------------------------------------
-      # 2️⃣ Set up Node.js (adjust version as needed)
+      # 2️⃣ Set up a supported Node.js version (Node 22 LTS)
       # -----------------------------------------------------------------
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'   # <-- updated from 20 to a supported version
           cache: 'npm'
 
       # -----------------------------------------------------------------
@@ -48,12 +45,6 @@ jobs:
 
       # -----------------------------------------------------------------
       # 4️⃣ Run the analysis/fix script
-      # -----------------------------------------------------------------
-      # Replace this block with whatever you need:
-      #   * Linting + auto‑fix (eslint --fix)
-      #   * Formatting (prettier --write)
-      #   * Custom JS/TS script that walks the repo and edits files
-      #   * Invocation of an LLM API (as shown in the previous answer)
       # -----------------------------------------------------------------
       - name: Run auto‑fix script
         id: fix
@@ -90,7 +81,7 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.ref }}   # the temporary branch created above
+          branch: auto-fix/${{ github.run_id }}
           base: ${{ github.event.inputs.ref || github.ref }}
           title: "🤖 Automatic code fixes"
           body: |
