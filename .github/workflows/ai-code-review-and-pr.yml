@@ -49,32 +49,31 @@ jobs:
           fi
 
       # -----------------------------------------------------------------
-      # 4️⃣ Install jq for JSON parsing
+      # 4️⃣ Install jq for JSON parsing (if the API returns JSON)
       # -----------------------------------------------------------------
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
       # -----------------------------------------------------------------
-      # 5️⃣ Package the source code (gzipped tarball, base64‑encoded)
-      #      The tarball is created in /tmp so tar never sees it while reading.
+      # 5️⃣ Package the source code (gzipped tarball) – placed in /tmp
       # -----------------------------------------------------------------
       - name: Package source code
         id: package
         run: |
           tar -czf /tmp/source-code.tar.gz --exclude-vcs --exclude='*.git' .
-          CODE_B64=$(base64 -w 0 /tmp/source-code.tar.gz)
-          echo "code_b64=$CODE_B64" >> $GITHUB_OUTPUT
+          # No output variable – we will use the file directly in the next step.
 
       # -----------------------------------------------------------------
-      # 6️⃣ Call the NVIDIA Integrate API and request a unified diff
+      # 6️⃣ CALL THE NVIDIA INTEGRATE API (JSON PAYLOAD – this is what NVIDIA NIM/Integrate expects)
       # -----------------------------------------------------------------
-      - name: Invoke NVIDIA review API
+      - name: Invoke NVIDIA review API – JSON
         id: review
         env:
           NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_INTEGRATE_API_KEY }}
         run: |
-          CODE_B64="${{ steps.package.outputs.code_b64 }}"
+          # Create a base64‑encoded string of the gzipped tarball
+          CODE_B64=$(base64 -w 0 /tmp/source-code.tar.gz)
 
           # Build the JSON payload (chat‑completion format)
           read -r -d '' PAYLOAD <<EOF
