@@ -1,14 +1,11 @@
 name: AI Code Review & PR
 
-# -----------------------------------------------------------------
-# Triggers
-# -----------------------------------------------------------------
 on:
   pull_request:
-    branches: [ main ]          # run on PRs targeting main (adjust as needed)
+    branches: [ main ]          # adjust as needed
   push:
-    branches: [ main ]          # optional: also run on direct pushes to main
-  workflow_dispatch:           # allow manual invocation from the Actions tab
+    branches: [ main ]
+  workflow_dispatch:           # manual trigger from the Actions tab
     inputs:
       ref:
         description: 'Git ref (branch, tag, or SHA) to check out'
@@ -21,6 +18,8 @@ jobs:
     permissions:
       contents: write          # needed to push commits & create PRs
       pull-requests: write    # needed to create a PR
+    env:
+      MODEL: nvidia/nemotron-3-super-120b-al2b   # model used for the review
     steps:
       # -----------------------------------------------------------------
       # 1️⃣ Checkout the repository (respect workflow_dispatch input if given)
@@ -41,14 +40,16 @@ jobs:
           cache: 'npm'
 
       # -----------------------------------------------------------------
-      # 3️⃣ Install dependencies (only if a package.json exists)
+      # 3️⃣ Install Node dependencies (only if a package.json exists)
       # -----------------------------------------------------------------
-      - name: Install Node dependencies (if any)
-        if: exists('package.json')
-        run: npm ci   # change to `npm install` / `yarn` / `pnpm` if you prefer
+      - name: Install Node dependencies (if package.json exists)
+        run: |
+          if [ -f package.json ]; then
+            npm ci   # change to `npm install` / `yarn` / `pnpm` if you prefer
+          fi
 
       # -----------------------------------------------------------------
-      # 4️⃣ Install jq for JSON parsing (needed to extract the AI response)
+      # 4️⃣ Install jq for JSON parsing
       # -----------------------------------------------------------------
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -59,9 +60,7 @@ jobs:
       - name: Package source code
         id: package
         run: |
-          # Create a gzipped tarball, excluding VCS metadata
           tar -czf source-code.tar.gz --exclude-vcs --exclude='*.git' .
-          # Base64‑encode it (single line) for safe inclusion in JSON
           CODE_B64=$(base64 -w 0 source-code.tar.gz)
           echo "code_b64=$CODE_B64" >> $GITHUB_OUTPUT
 
@@ -71,17 +70,15 @@ jobs:
       - name: Invoke NVIDIA review API
         id: review
         env:
-          NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1   # from your input
+          NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_INTEGRATE_API_KEY }}
-          MODEL: nvidia/nemotron-3-super-120b-al2b               # from your input
         run: |
-          # Retrieve the base64‑encoded tarball from the previous step
           CODE_B64="${{ steps.package.outputs.code_b64 }}"
 
           # Build the JSON payload (chat‑completion format)
           read -r -d '' PAYLOAD <<EOF
           {
-            "model": "$MODEL",
+            "model": "${MODEL}",
             "messages": [
               {
                 "role": "system",
@@ -107,28 +104,29 @@ jobs:
           # Extract the assistant's message content (the diff)
           DIFF=$(jq -r '.choices[0].message.content // empty' nvidia-response.json)
 
-          # Save the diff for later use
-          echo "diff<<$DIFF" >> $GITHUB_ENV   # store as a multiline env var
-          echo "diff_received=true" >> $GITHUB_OUTPUT
-
-      # -----------------------------------------------------------------
-      # 7️⃣ Apply the diff (if any) and detect whether changes were made
-      # -----------------------------------------------------------------
-      - name: Apply AI‑generated diff
-        id: apply
-        if: steps.review.outputs.diff_received == 'true'
-        run: |
-          # The diff is stored in the environment variable $DIFF (multiline)
+          # Write the diff to a file for the next step
           echo "$DIFF" > ai-suggested.diff
 
-          # Attempt to apply the diff; ignore whitespace‑only errors
+          # Flag whether the diff is empty (only whitespace)
+          if [[ -z "$(echo "$DIFF" | sed 's/[[:space:]]//g')" ]]; then
+            echo "diff_empty=true" >> $GITHUB_OUTPUT
+          else
+            echo "diff_empty=false" >> $GITHUB_OUTPUT
+          fi
+
+      # -----------------------------------------------------------------
+      # 7️⃣ Apply the AI‑generated diff (if any)
+      # -----------------------------------------------------------------
+      - name: Apply AI‑generated diff
+        if: steps.review.outputs.diff_empty == 'false'
+        id: apply
+        run: |
+          # Apply the diff; allow whitespace fixes
           if git apply --whitespace=fix ai-suggested.diff; then
             echo "Applied diff successfully."
           else
-            # If apply fails, try with --reject to see what parts failed
-            echo "git apply failed; checking for rejected hunks..."
+            # If the direct apply fails, try with --reject to see what failed
             git apply --reject ai-suggested.diff || true
-            # If there are .rej files, we consider the apply unsuccessful
             if ls *.rej 2>/dev/null | grep -q .; then
               echo "Some hunks were rejected – treating as no changes."
               exit 1
@@ -170,7 +168,7 @@ jobs:
           body: |
             This PR was created automatically by the **AI Code Review & PR** workflow.
 
-            The model **${{ env.MODEL }}** reviewed the source code and returned a unified diff, which was applied above.
+            The model **${MODEL}** reviewed the source code and returned a unified diff, which was applied above.
 
             View the full AI response: [nvidia-response.json](nvidia-response.json)
           labels: |
