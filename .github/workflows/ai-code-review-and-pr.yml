@@ -1,0 +1,179 @@
+name: AI Code Review & PR
+
+# -----------------------------------------------------------------
+# Triggers
+# -----------------------------------------------------------------
+on:
+  pull_request:
+    branches: [ main ]          # run on PRs targeting main (adjust as needed)
+  push:
+    branches: [ main ]          # optional: also run on direct pushes to main
+  workflow_dispatch:           # allow manual invocation from the Actions tab
+    inputs:
+      ref:
+        description: 'Git ref (branch, tag, or SHA) to check out'
+        required: false
+        default: 'main'
+
+jobs:
+  review-and-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # needed to push commits & create PRs
+      pull-requests: write    # needed to create a PR
+    steps:
+      # -----------------------------------------------------------------
+      # 1️⃣ Checkout the repository (respect workflow_dispatch input if given)
+      # -----------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------
+      # 2️⃣ Set up a supported Node.js version (Node 22 LTS)
+      # -----------------------------------------------------------------
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # current LTS – avoids Node 20 deprecation warning
+          cache: 'npm'
+
+      # -----------------------------------------------------------------
+      # 3️⃣ Install dependencies (only if a package.json exists)
+      # -----------------------------------------------------------------
+      - name: Install Node dependencies (if any)
+        if: exists('package.json')
+        run: npm ci   # change to `npm install` / `yarn` / `pnpm` if you prefer
+
+      # -----------------------------------------------------------------
+      # 4️⃣ Install jq for JSON parsing (needed to extract the AI response)
+      # -----------------------------------------------------------------
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # -----------------------------------------------------------------
+      # 5️⃣ Package the source code (gzipped tarball, base64‑encoded)
+      # -----------------------------------------------------------------
+      - name: Package source code
+        id: package
+        run: |
+          # Create a gzipped tarball, excluding VCS metadata
+          tar -czf source-code.tar.gz --exclude-vcs --exclude='*.git' .
+          # Base64‑encode it (single line) for safe inclusion in JSON
+          CODE_B64=$(base64 -w 0 source-code.tar.gz)
+          echo "code_b64=$CODE_B64" >> $GITHUB_OUTPUT
+
+      # -----------------------------------------------------------------
+      # 6️⃣ Call the NVIDIA Integrate API and request a unified diff
+      # -----------------------------------------------------------------
+      - name: Invoke NVIDIA review API
+        id: review
+        env:
+          NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1   # from your input
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_INTEGRATE_API_KEY }}
+          MODEL: nvidia/nemotron-3-super-120b-al2b               # from your input
+        run: |
+          # Retrieve the base64‑encoded tarball from the previous step
+          CODE_B64="${{ steps.package.outputs.code_b64 }}"
+
+          # Build the JSON payload (chat‑completion format)
+          read -r -d '' PAYLOAD <<EOF
+          {
+            "model": "$MODEL",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are an expert code reviewer. Analyze the supplied source code and return a unified diff (git‑apply format) that fixes any bugs, security issues, or improvements you find. If no changes are needed, return an empty string."
+              },
+              {
+                "role": "user",
+                "content": "Here is the source code (base64‑gzipped tarball):\n$CODE_B64"
+              }
+            ],
+            "temperature": 0.0,
+            "max_tokens": 4096
+          }
+          EOF
+
+          # Send the request and save the raw response
+          curl -s -X POST "$NVIDIA_ENDPOINT" \
+            -H "Authorization: Bearer $NVIDIA_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            -o nvidia-response.json
+
+          # Extract the assistant's message content (the diff)
+          DIFF=$(jq -r '.choices[0].message.content // empty' nvidia-response.json)
+
+          # Save the diff for later use
+          echo "diff<<$DIFF" >> $GITHUB_ENV   # store as a multiline env var
+          echo "diff_received=true" >> $GITHUB_OUTPUT
+
+      # -----------------------------------------------------------------
+      # 7️⃣ Apply the diff (if any) and detect whether changes were made
+      # -----------------------------------------------------------------
+      - name: Apply AI‑generated diff
+        id: apply
+        if: steps.review.outputs.diff_received == 'true'
+        run: |
+          # The diff is stored in the environment variable $DIFF (multiline)
+          echo "$DIFF" > ai-suggested.diff
+
+          # Attempt to apply the diff; ignore whitespace‑only errors
+          if git apply --whitespace=fix ai-suggested.diff; then
+            echo "Applied diff successfully."
+          else
+            # If apply fails, try with --reject to see what parts failed
+            echo "git apply failed; checking for rejected hunks..."
+            git apply --reject ai-suggested.diff || true
+            # If there are .rej files, we consider the apply unsuccessful
+            if ls *.rej 2>/dev/null | grep -q .; then
+              echo "Some hunks were rejected – treating as no changes."
+              exit 1
+            fi
+          fi
+
+          # Detect if the working tree now has changes
+          if git diff --quiet; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      # -----------------------------------------------------------------
+      # 8️⃣ Commit changes and push to a temporary branch (if any changes)
+      # -----------------------------------------------------------------
+      - name: Commit AI‑suggested fixes
+        if: steps.apply.outputs.no_changes == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BRANCH="ai-review/${{ github.run_id }}"
+          git checkout -b $BRANCH
+          git add -u
+          git commit -m "chore: apply AI‑suggested code fixes (run ${{ github.run_id }})"
+          git push origin $BRANCH
+
+      # -----------------------------------------------------------------
+      # 9️⃣ Open a Pull Request with the AI‑suggested fixes
+      # -----------------------------------------------------------------
+      - name: Create PR from AI fixes
+        if: steps.apply.outputs.no_changes == 'false'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ai-review/${{ github.run_id }}
+          base: ${{ github.event.inputs.ref || github.ref }}
+          title: "🤖 AI‑generated code review & fixes"
+          body: |
+            This PR was created automatically by the **AI Code Review & PR** workflow.
+
+            The model **${{ env.MODEL }}** reviewed the source code and returned a unified diff, which was applied above.
+
+            View the full AI response: [nvidia-response.json](nvidia-response.json)
+          labels: |
+            ai-review
+            auto-fix
+          draft: false
