@@ -5,7 +5,7 @@ on:
     branches: [ main ]          # adjust as needed
   push:
     branches: [ main ]
-  workflow_dispatch:           # manual trigger
+  workflow_dispatch:           # allows manual invocation
     inputs:
       ref:
         description: 'Git ref (branch, tag, or SHA) to check out'
@@ -34,7 +34,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'   # <-- updated from 20 to a supported version
+          node-version: '22'   # <-- use a supported version (22 or 24)
           cache: 'npm'
 
       # -----------------------------------------------------------------
