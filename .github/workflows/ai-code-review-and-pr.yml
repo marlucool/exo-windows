@@ -56,11 +56,15 @@ jobs:
 
       # -----------------------------------------------------------------
       # 5️⃣ Package the source code (gzipped tarball, base64‑encoded)
+      #      Exclude the tarball itself and VCS metadata.
       # -----------------------------------------------------------------
       - name: Package source code
         id: package
         run: |
-          tar -czf source-code.tar.gz --exclude-vcs --exclude='*.git' .
+          tar -czf source-code.tar.gz \
+            --exclude-vcs \
+            --exclude='*.git' \
+            --exclude='source-code.tar.gz' .
           CODE_B64=$(base64 -w 0 source-code.tar.gz)
           echo "code_b64=$CODE_B64" >> $GITHUB_OUTPUT
 
