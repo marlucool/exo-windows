@@ -19,86 +19,63 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      MODEL: nvidia/nemotron-3-super-120b-al2b
-      NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1
+      MODEL: nemotron-3-super-120b-al2b
+      NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1/chat/completions
     steps:
-      # -----------------------------------------------------------------
-      # 1️⃣ Checkout the repository
-      # -----------------------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
           fetch-depth: 0
 
-      # -----------------------------------------------------------------
-      # 2️⃣ Set up Node.js 22 LTS
-      # -----------------------------------------------------------------
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'npm'
 
-      # -----------------------------------------------------------------
-      # 3️⃣ Install Node dependencies (if package.json exists)
-      # -----------------------------------------------------------------
       - name: Install Node dependencies (if package.json exists)
         run: |
           if [ -f package.json ]; then
             npm ci
           fi
 
-      # -----------------------------------------------------------------
-      # 4️⃣ Install jq for JSON parsing
-      # -----------------------------------------------------------------
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      # -----------------------------------------------------------------
-      # 5️⃣ Package source code → write base64 to a FILE (not step output)
-      # -----------------------------------------------------------------
       - name: Package source code
         id: package
         run: |
-          # Create tarball excluding version control directories
           tar -czf /tmp/source-code.tar.gz \
             --exclude='.git' --exclude='.svn' --exclude='.hg' --exclude='CVS' \
             --exclude='.bzr' --exclude='_darcs' .
-          # Verify tarball was created and is not empty
           if [ ! -s /tmp/source-code.tar.gz ]; then
             echo "Error: source code tarball is missing or empty"
             exit 1
           fi
           echo "Tarball created: $(wc -c < /tmp/source-code.tar.gz) bytes"
+          CODE_B64=$(base64 -w 0 /tmp/source-code.tar.gz)
+          printf '%s' "$CODE_B64" > /tmp/code_b64.txt
 
-          # Create base64-encoded string of the gzipped tarball → WRITE TO FILE
-          base64 -w 0 /tmp/source-code.tar.gz > /tmp/code_b64.txt
-          echo "code_b64_path=/tmp/code_b64.txt" >> $GITHUB_OUTPUT
-
-      # -----------------------------------------------------------------
-      # 6️⃣ CALL THE NVIDIA INTEGRATE API – read base64 from FILE
-      # -----------------------------------------------------------------
-      - name: Invoke NVIDIA review API – JSON
+      - name: Invoke NVIDIA review API
         id: review
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_INTEGRATE_API_KEY }}
         run: |
-          # Read base64 from file (avoids step-output size limit)
-          CODE_B64=$(cat "${{ steps.package.outputs.code_b64_path }}")
+          set -euo pipefail
+          CODE_B64=$(cat /tmp/code_b64.txt)
 
-          # Build JSON payload to a FILE (avoids command-line length & templating issues)
           cat > /tmp/payload.json <<EOF
           {
             "model": "${MODEL}",
             "messages": [
               {
                 "role": "system",
-                "content": "You are an expert code reviewer. Analyze the supplied source code and return a unified diff (git‑apply format) that fixes any bugs, security issues, or improvements you find. If no changes are needed, return an empty string."
+                "content": "You are an expert code reviewer. Analyze the supplied source code and return a unified diff (git-apply format) that fixes any bugs, security issues, or improvements you find. If no changes are needed, return an empty string."
               },
               {
                 "role": "user",
-                "content": "Here is the source code (base64‑gzipped tarball):\n$CODE_B64"
+                "content": "Here is the source code (base64-gzipped tarball):\n$CODE_B64"
               }
             ],
             "temperature": 0.0,
@@ -106,38 +83,47 @@ jobs:
           }
           EOF
 
-          # Send request using @file syntax (streams payload, no size issues)
           curl -s -X POST "$NVIDIA_ENDPOINT" \
             -H "Authorization: Bearer $NVIDIA_API_KEY" \
             -H "Content-Type: application/json" \
             -d @/tmp/payload.json \
+            -w "\nHTTP_STATUS:%{http_code}\n" \
             -o nvidia-response.json
 
-          # Extract the assistant's message content (the diff)
-          DIFF=$(jq -r '.choices[0].message.content // empty' nvidia-response.json)
+          HTTP_STATUS=$(tail -n1 nvidia-response.json | sed 's/.*HTTP_STATUS://')
+          head -n -1 nvidia-response.json > nvidia-response-body.json
+          mv nvidia-response-body.json nvidia-response.json
 
-          # Write the diff to a file for the next step
+          echo "=== NVIDIA API Response (HTTP $HTTP_STATUS) ==="
+          cat nvidia-response.json
+          echo "=== End Response ==="
+
+          if [[ "$HTTP_STATUS" -ge 400 ]]; then
+            echo "API request failed with status $HTTP_STATUS"
+            exit 1
+          fi
+
+          DIFF=$(jq -r '.choices[0].message.content // empty' nvidia-response.json 2>/dev/null || echo "")
+
+          if [[ -z "$DIFF" ]]; then
+            DIFF=$(jq -r '.content // .text // .output // empty' nvidia-response.json 2>/dev/null || echo "")
+          fi
+
           echo "$DIFF" > ai-suggested.diff
 
-          # Flag whether the diff is empty (only whitespace)
           if [[ -z "$(echo "$DIFF" | sed 's/[[:space:]]//g')" ]]; then
             echo "diff_empty=true" >> $GITHUB_OUTPUT
           else
             echo "diff_empty=false" >> $GITHUB_OUTPUT
           fi
 
-      # -----------------------------------------------------------------
-      # 7️⃣ Apply the AI‑generated diff (if any)
-      # -----------------------------------------------------------------
-      - name: Apply AI‑generated diff
+      - name: Apply AI-generated diff
         if: steps.review.outputs.diff_empty == 'false'
         id: apply
         run: |
-          # Apply the diff; allow whitespace fixes
           if git apply --whitespace=fix ai-suggested.diff; then
             echo "Applied diff successfully."
           else
-            # If the direct apply fails, try with --reject to see what failed
             git apply --reject ai-suggested.diff || true
             if ls *.rej 2>/dev/null | grep -q .; then
               echo "Some hunks were rejected – treating as no changes."
@@ -145,17 +131,13 @@ jobs:
             fi
           fi
 
-          # Detect if the working tree now has changes
           if git diff --quiet; then
             echo "no_changes=true" >> $GITHUB_OUTPUT
           else
             echo "no_changes=false" >> $GITHUB_OUTPUT
           fi
 
-      # -----------------------------------------------------------------
-      # 8️⃣ Commit changes and push to a temporary branch (if any changes)
-      # -----------------------------------------------------------------
-      - name: Commit AI‑suggested fixes
+      - name: Commit AI-suggested fixes
         if: steps.apply.outputs.no_changes == 'false'
         run: |
           git config user.name "github-actions[bot]"
@@ -163,12 +145,9 @@ jobs:
           BRANCH="ai-review/${{ github.run_id }}"
           git checkout -b $BRANCH
           git add -u
-          git commit -m "chore: apply AI‑suggested code fixes (run ${{ github.run_id }})"
+          git commit -m "chore: apply AI-suggested code fixes (run ${{ github.run_id }})"
           git push origin $BRANCH
 
-      # -----------------------------------------------------------------
-      # 9️⃣ Open a Pull Request with the AI‑suggested fixes
-      # -----------------------------------------------------------------
       - name: Create PR from AI fixes
         if: steps.apply.outputs.no_changes == 'false'
         uses: peter-evans/create-pull-request@v6
@@ -176,7 +155,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: ai-review/${{ github.run_id }}
           base: ${{ github.event.inputs.ref || github.ref }}
-          title: "🤖 AI‑generated code review & fixes"
+          title: "🤖 AI-generated code review & fixes"
           body: |
             This PR was created automatically by the **AI Code Review & PR** workflow.
 
