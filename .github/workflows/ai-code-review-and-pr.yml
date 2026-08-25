@@ -19,7 +19,7 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      MODEL: nemotron-3-super-120b-al2b
+      MODEL: nvidia/nemotron-3-super-120b-a12b
       NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1/chat/completions
     steps:
       - name: Checkout code
@@ -83,16 +83,16 @@ jobs:
           }
           EOF
 
-          curl -s -X POST "$NVIDIA_ENDPOINT" \
+          # Capture HTTP status code separately from response body
+          HTTP_STATUS=$(curl -s -X POST "$NVIDIA_ENDPOINT" \
             -H "Authorization: Bearer $NVIDIA_API_KEY" \
             -H "Content-Type: application/json" \
             -d @/tmp/payload.json \
-            -w "\nHTTP_STATUS:%{http_code}\n" \
-            -o nvidia-response.json
+            -o /tmp/curl_body.txt \
+            -w "%{http_code}")
 
-          HTTP_STATUS=$(tail -n1 nvidia-response.json | sed 's/.*HTTP_STATUS://')
-          head -n -1 nvidia-response.json > nvidia-response-body.json
-          mv nvidia-response-body.json nvidia-response.json
+          # Move the body to the expected response file
+          mv /tmp/curl_body.txt nvidia-response.json
 
           echo "=== NVIDIA API Response (HTTP $HTTP_STATUS) ==="
           cat nvidia-response.json
