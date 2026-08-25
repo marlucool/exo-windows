@@ -60,8 +60,16 @@ jobs:
       - name: Package source code
         id: package
         run: |
-          tar -czf /tmp/source-code.tar.gz --exclude-vcs --exclude='*.git' .
-          # No output variable – we will use the file directly in the next step.
+          # Create tarball excluding version control directories
+          tar -czf /tmp/source-code.tar.gz \
+            --exclude='.git' --exclude='.svn' --exclude='.hg' --exclude='CVS' \
+            --exclude='.bzr' --exclude='_darcs' .
+          # Verify tarball was created and is not empty
+          if [ ! -s /tmp/source-code.tar.gz ]; then
+            echo "Error: source code tarball is missing or empty"
+            exit 1
+          fi
+          echo "Tarball created: $(wc -c < /tmp/source-code.tar.gz) bytes"
 
       # -----------------------------------------------------------------
       # 6️⃣ CALL THE NVIDIA INTEGRATE API (JSON PAYLOAD – this is what NVIDIA NIM/Integrate expects)
