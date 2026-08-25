@@ -2,10 +2,10 @@ name: AI Code Review & PR
 
 on:
   pull_request:
-    branches: [ main ]          # adjust as needed
+    branches: [ main ]
   push:
     branches: [ main ]
-  workflow_dispatch:           # manual trigger from the Actions tab
+  workflow_dispatch:
     inputs:
       ref:
         description: 'Git ref (branch, tag, or SHA) to check out'
@@ -16,13 +16,14 @@ jobs:
   review-and-pr:
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # needed to push commits & create PRs
-      pull-requests: write    # needed to create a PR
+      contents: write
+      pull-requests: write
     env:
-      MODEL: nvidia/nemotron-3-super-120b-al2b   # model used for the review
+      MODEL: nvidia/nemotron-3-super-120b-al2b
+      NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1
     steps:
       # -----------------------------------------------------------------
-      # 1️⃣ Checkout the repository (respect workflow_dispatch input if given)
+      # 1️⃣ Checkout the repository
       # -----------------------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
@@ -31,31 +32,31 @@ jobs:
           fetch-depth: 0
 
       # -----------------------------------------------------------------
-      # 2️⃣ Set up a supported Node.js version (Node 22 LTS)
+      # 2️⃣ Set up Node.js 22 LTS
       # -----------------------------------------------------------------
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'   # current LTS – avoids Node 20 deprecation warning
+          node-version: '22'
           cache: 'npm'
 
       # -----------------------------------------------------------------
-      # 3️⃣ Install Node dependencies (only if a package.json exists)
+      # 3️⃣ Install Node dependencies (if package.json exists)
       # -----------------------------------------------------------------
       - name: Install Node dependencies (if package.json exists)
         run: |
           if [ -f package.json ]; then
-            npm ci   # change to `npm install` / `yarn` / `pnpm` if you prefer
+            npm ci
           fi
 
       # -----------------------------------------------------------------
-      # 4️⃣ Install jq for JSON parsing (if the API returns JSON)
+      # 4️⃣ Install jq for JSON parsing
       # -----------------------------------------------------------------
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
       # -----------------------------------------------------------------
-      # 5️⃣ Package the source code (gzipped tarball) – placed in /tmp
+      # 5️⃣ Package source code → write base64 to a FILE (not step output)
       # -----------------------------------------------------------------
       - name: Package source code
         id: package
@@ -71,24 +72,23 @@ jobs:
           fi
           echo "Tarball created: $(wc -c < /tmp/source-code.tar.gz) bytes"
 
-          # Create base64-encoded string of the gzipped tarball
-          CODE_B64=$(base64 -w 0 /tmp/source-code.tar.gz)
-          echo "code_b64=$CODE_B64" >> $GITHUB_OUTPUT
+          # Create base64-encoded string of the gzipped tarball → WRITE TO FILE
+          base64 -w 0 /tmp/source-code.tar.gz > /tmp/code_b64.txt
+          echo "code_b64_path=/tmp/code_b64.txt" >> $GITHUB_OUTPUT
 
       # -----------------------------------------------------------------
-      # 6️⃣ CALL THE NVIDIA INTEGRATE API (JSON PAYLOAD – this is what NVIDIA NIM/Integrate expects)
+      # 6️⃣ CALL THE NVIDIA INTEGRATE API – read base64 from FILE
       # -----------------------------------------------------------------
       - name: Invoke NVIDIA review API – JSON
         id: review
         env:
-          NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_INTEGRATE_API_KEY }}
         run: |
-          # Retrieve the base64 string from the packaging step
-          CODE_B64="${{ steps.package.outputs.code_b64 }}"
+          # Read base64 from file (avoids step-output size limit)
+          CODE_B64=$(cat "${{ steps.package.outputs.code_b64_path }}")
 
-          # Build the JSON payload (chat‑completion format)
-          read -r -d '' PAYLOAD <<EOF
+          # Build JSON payload to a FILE (avoids command-line length & templating issues)
+          cat > /tmp/payload.json <<EOF
           {
             "model": "${MODEL}",
             "messages": [
@@ -106,11 +106,11 @@ jobs:
           }
           EOF
 
-          # Send the request and save the raw response
+          # Send request using @file syntax (streams payload, no size issues)
           curl -s -X POST "$NVIDIA_ENDPOINT" \
             -H "Authorization: Bearer $NVIDIA_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD" \
+            -d @/tmp/payload.json \
             -o nvidia-response.json
 
           # Extract the assistant's message content (the diff)
