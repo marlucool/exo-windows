@@ -71,6 +71,10 @@ jobs:
           fi
           echo "Tarball created: $(wc -c < /tmp/source-code.tar.gz) bytes"
 
+          # Create base64-encoded string of the gzipped tarball
+          CODE_B64=$(base64 -w 0 /tmp/source-code.tar.gz)
+          echo "code_b64=$CODE_B64" >> $GITHUB_OUTPUT
+
       # -----------------------------------------------------------------
       # 6️⃣ CALL THE NVIDIA INTEGRATE API (JSON PAYLOAD – this is what NVIDIA NIM/Integrate expects)
       # -----------------------------------------------------------------
@@ -80,8 +84,8 @@ jobs:
           NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_INTEGRATE_API_KEY }}
         run: |
-          # Create a base64‑encoded string of the gzipped tarball
-          CODE_B64=$(base64 -w 0 /tmp/source-code.tar.gz)
+          # Retrieve the base64 string from the packaging step
+          CODE_B64="${{ steps.package.outputs.code_b64 }}"
 
           # Build the JSON payload (chat‑completion format)
           read -r -d '' PAYLOAD <<EOF
