@@ -47,7 +47,7 @@ jobs:
           git reset --hard HEAD
           git clean -fdx
 
-      - name: Package source code (include only source files)
+      - name: Package source code (exclude .git and .github directories)
         id: package
         run: |
           # Define source file extensions to include
@@ -55,10 +55,10 @@ jobs:
           # Create a temporary file list
           FILE_LIST=$(mktemp)
           for ext in $EXT_LIST; do
-            find . -type f -name "*.$ext" -not -path './.git/*' >> "$FILE_LIST"
+            find . -type f -name "*.$ext" -not -path './.git/*' -not -path './.github/*' >> "$FILE_LIST"
           done
-          # Also include config files like Makefile, CMakeLists.txt, etc.
-          find . -type f \( -name 'Makefile' -o -name 'CMakeLists.txt' -o -name '*.mk' -o -name '*.cmake' -o -name '*.ini' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' -o -name '*.toml' -o -name '*.xml' -o -name '*.cfg' -o -name '*.conf' -o -name '*.config' -o -name '*.props' -o -name '*.csproj' -o -name '*.vcxproj' -o -name '*.sln' \) -not -path './.git/*' >> "$FILE_LIST"
+          # Also include config files like Makefile, CMakeLists.txt, etc., but exclude .git and .github
+          find . -type f \( -name 'Makefile' -o -name 'CMakeLists.txt' -o -name '*.mk' -o -name '*.cmake' -o -name '*.ini' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' -o -name '*.toml' -o -name '*.xml' -o -name '*.cfg' -o -name '*.conf' -o -name '*.config' -o -name '*.props' -o -name '*.csproj' -o -name '*.vcxproj' -o -name '*.sln' \) -not -path './.git/*' -not -path './.github/*' >> "$FILE_LIST"
           # Remove duplicates
           sort -u "$FILE_LIST" > "${FILE_LIST}.sorted"
           mv "${FILE_LIST}.sorted" "$FILE_LIST"
