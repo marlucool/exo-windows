@@ -120,13 +120,14 @@ jobs:
             DIFF=$(jq -r '.content // .text // .output // empty' nvidia-response.json 2>/dev/null || echo "")
           fi
           echo "$DIFF" > ai-suggested.diff
-          if [[ -z "$(echo "$DIFF" | sed 's/[[:space:]]//g')" ]]; then
-            echo "diff_empty=true" >> $GITHUB_OUTPUT
+          # Determine if diff is meaningful (contains actual changes)
+          if [[ -n "$DIFF" && "$DIFF" =~ ^[\+-] ]]; then
+            echo "diff_has_changes=true" >> $GITHUB_OUTPUT
           else
-            echo "diff_empty=false" >> $GITHUB_OUTPUT
+            echo "diff_has_changes=false" >> $GITHUB_OUTPUT
           fi
       - name: Apply AI-generated diff
-        if: steps.review.outputs.diff_empty == 'false'
+        if: steps.review.outputs.diff_has_changes == 'true'
         id: apply
         run: |
           if git apply --whitespace=fix ai-suggested.diff; then
