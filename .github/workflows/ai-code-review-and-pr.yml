@@ -156,17 +156,20 @@ jobs:
           git push origin $BRANCH
       - name: Create PR from AI fixes
         if: steps.apply.outputs.no_changes == 'false'
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ai-review/${{ github.run_id }}
-          base: ${{ github.event.inputs.ref || github.ref }}
-          title: "🤖 AI-generated code review & fixes"
-          body: |
-            This PR was created automatically by the **AI Code Review & PR** workflow.
-            The model **${MODEL}** reviewed the source code and returned a unified diff, which was applied above.
-            View the full AI response: [nvidia-response.json](nvidia-response.json)
-          labels: |
-            ai-review
-            auto-fix
-          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          GH_BRANCH: ai-review/${{ github.run_id }}
+        run: |
+          PR_TITLE="🤖 AI-generated code review & fixes"
+          PR_BODY="This PR was created automatically by the **AI Code Review & PR** workflow.
+          The model **${MODEL}** reviewed the source code and returned a unified diff, which was applied above.
+          View the full AI response: [nvidia-response.json](nvidia-response.json)"
+
+          # Use jq to create the JSON payload to avoid escaping issues
+          PAYLOAD=$(jq -n --arg title "$PR_TITLE" --arg head "$GH_BRANCH" --arg base "${{ github.event.inputs.ref || github.ref }}" --arg body "$PR_BODY" '{title: $title, head: $head, base: $base, body: $body}')
+          echo "Payload: $PAYLOAD"
+          curl -X POST -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/$GH_REPO/pulls \
+            -d "$PAYLOAD"
