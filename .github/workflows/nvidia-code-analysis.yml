@@ -1,0 +1,75 @@
+name: NVIDIA Code Analysis
+
+# Run on every pull request targeting the default branch (adjust as needed)
+on:
+  pull_request:
+    branches: [ main ]   # or ['*'] for all branches
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------------
+      # 1️⃣ Checkout the repository so the workflow can access the source
+      # -----------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history if your analysis needs it
+
+      # -----------------------------------------------------------------
+      # 2️⃣ (Optional) Prepare the code for transmission.
+      #     Here we create a gzipped tarball of the entire repo.
+      #     Adjust the exclude patterns if you want to omit certain files.
+      # -----------------------------------------------------------------
+      - name: Package source code
+        run: |
+          tar -czf source-code.tar.gz --exclude-vcs --exclude='*.git' .
+
+      # -----------------------------------------------------------------
+      # 3️⃣ Call the NVIDIA Integrate API.
+      #     The example uses the chat‑completions endpoint; replace the
+      #     model and messages payload with whatever your analysis requires.
+      # -----------------------------------------------------------------
+      - name: Invoke NVIDIA analysis API
+        env:
+          NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1/chat/completions
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          # Read the packaged code (base64‑encoded to safely embed in JSON)
+          CODE_BASE64=$(base64 -w 0 source-code.tar.gz)
+
+          # Construct the JSON payload – adjust as needed for your use case
+          read -r -d '' PAYLOAD <<EOF
+          {
+            "model": "nvidia/nemotron-3-super-120b-al2b",   // <-- replace with the model you want
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are an expert code reviewer. Analyze the supplied source code for bugs, security issues, and improvements."
+              },
+              {
+                "role": "user",
+                "content": "Here is the source code (base64‑gzipped tarball):\n${CODE_BASE64}"
+              }
+            ],
+            "temperature": 0.2,
+            "max_tokens": 1024
+          }
+          EOF
+
+          # Send the request
+          curl -s -X POST "$NVIDIA_ENDPOINT" \
+            -H "Authorization: Bearer $NVIDIA_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            -o nvidia-response.json
+
+          # Optionally, print a snippet of the response for the job log
+          echo "=== NVIDIA API Response (first 500 chars) ==="
+          head -c 500 nvidia-response.json
+          echo ""
+
+          # If you want to fail the job based on the response, add logic here.
+          # For example, check for a specific field and exit non‑zero if needed.
