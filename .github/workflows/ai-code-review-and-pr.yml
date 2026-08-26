@@ -96,7 +96,7 @@ jobs:
               }
             ],
             "temperature": 0.0,
-            "max_tokens": 4096
+            "max_tokens": 8192
           }
           EOF
           # Capture HTTP status code separately from response body
@@ -126,36 +126,39 @@ jobs:
           else
             echo "diff_has_changes=false" >> $GITHUB_OUTPUT
           fi
-      - name: Apply AI-generated diff
-        if: steps.review.outputs.diff_has_changes == 'true'
-        id: apply
-        run: |
-          if git apply --whitespace=fix ai-suggested.diff; then
-            echo "Applied diff successfully."
-          else
-            git apply --reject ai-suggested.diff || true
-            if ls *.rej 2>/dev/null | grep -q .; then
-              echo "Some hunks were rejected – treating as no changes."
-              exit 1
-            fi
-          fi
-          if git diff --quiet; then
-            echo "no_changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "no_changes=false" >> $GITHUB_OUTPUT
-          fi
-      - name: Commit AI-suggested fixes
-        if: steps.apply.outputs.no_changes == 'false'
+          # Always save the AI commentary for PR body
+          echo "$DIFF" > ai-commentary.txt
+      - name: Create branch and commit AI-suggested fixes or commentary
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           BRANCH="ai-review/${{ github.run_id }}"
           git checkout -b $BRANCH
-          git add -u
-          git commit -m "chore: apply AI-suggested code fixes (run ${{ github.run_id }})"
+          if [[ "${{ steps.review.outputs.diff_has_changes }}" == "true" ]]; then
+            if git apply --whitespace=fix ai-suggested.diff; then
+              echo "Applied diff successfully."
+            else
+              git apply --reject ai-suggested.diff || true
+              if ls *.rej 2>/dev/null | grep -q .; then
+                echo "Some hunks were rejected – treating as no changes."
+                # fallback to commentary only
+                touch AI-REVIEW.md
+                echo "# AI Code Review" > AI-REVIEW.md
+                cat ai-commentary.txt >> AI-REVIEW.md
+                git add AI-REVIEW.md
+              fi
+            fi
+          else
+            # No code changes, but still create a commit with the AI commentary
+            touch AI-REVIEW.md
+            echo "# AI Code Review" > AI-REVIEW.md
+            cat ai-commentary.txt >> AI-REVIEW.md
+            git add AI-REVIEW.md
+          fi
+          git commit -m "chore: apply AI-suggested code fixes (run ${{ github.run_id }})" || echo "No changes to commit"
           git push origin $BRANCH
       - name: Create PR from AI fixes
-        if: steps.apply.outputs.no_changes == 'false'
+        if: github.ref == 'refs/heads/main'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
