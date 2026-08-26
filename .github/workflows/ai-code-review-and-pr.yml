@@ -42,20 +42,27 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Package source code (exclude large binary assets)
+      - name: Package source code (include only source files)
         id: package
         run: |
-          # Exclude common binary/asset directories that are not needed for code review
-          tar -czf /tmp/source-code.tar.gz \
-            --exclude='.git' --exclude='.svn' --exclude='.hg' --exclude='CVS' \
-            --exclude='.bzr' --exclude='_darcs' \
-            --exclude='app/EXO/EXO/Assets.xcassets/**' \
-            --exclude='dashboard/**' \
-            --exclude='docs/imgs/**' \
-            --exclude='packaging/dmg/background.png' \
-            --exclude='*.png' --exclude='*.jpg' --exclude='*.jpeg' --exclude='*.gif' --exclude='*.ico' \
-            --exclude='*.mp3' --exclude='*.wav' --exclude='*.mp4' --exclude='*.mov' \
-            .
+          # Define source file extensions to include
+          EXT_LIST="go cs cpp c h hpp java js ts py rs"
+          # Create a temporary file list
+          FILE_LIST=$(mktemp)
+          for ext in $EXT_LIST; do
+            find . -type f -name "*.$ext" -not -path './.git/*' >> "$FILE_LIST"
+          done
+          # Also include config files like Makefile, CMakeLists.txt, etc.
+          find . -type f \( -name 'Makefile' -o -name 'CMakeLists.txt' -o -name '*.mk' -o -name '*.cmake' -o -name '*.ini' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' -o -name '*.toml' -o -name '*.xml' -o -name '*.cfg' -o -name '*.conf' -o -name '*.config' -o -name '*.props' -o -name '*.csproj' -o -name '*.vcxproj' -o -name '*.sln' \) -not -path './.git/*' >> "$FILE_LIST"
+          # Remove duplicates
+          sort -u "$FILE_LIST" > "${FILE_LIST}.sorted"
+          mv "${FILE_LIST}.sorted" "$FILE_LIST"
+          if [ ! -s "$FILE_LIST" ]; then
+            echo "Error: no source files found"
+            exit 1
+          fi
+          tar -czf /tmp/source-code.tar.gz -T "$FILE_LIST"
+          rm -f "$FILE_LIST"
           if [ ! -s /tmp/source-code.tar.gz ]; then
             echo "Error: source code tarball is missing or empty"
             exit 1
