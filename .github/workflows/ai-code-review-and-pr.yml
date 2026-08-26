@@ -1,0 +1,159 @@
+name: AI Code Review & PR
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (branch, tag, or SHA) to check out'
+        required: false
+        default: 'main'
+
+jobs:
+  review-and-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      MODEL: nvidia/nemotron-3-super-120b-a12b
+      NVIDIA_ENDPOINT: https://integrate.api.nvidia.com/v1/chat/completions
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Node dependencies (if package.json exists)
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+          fi
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Package source code (exclude large binary assets)
+        id: package
+        run: |
+          # Exclude common binary/asset directories that are not needed for code review
+          tar -czf /tmp/source-code.tar.gz \
+            --exclude='.git' --exclude='.svn' --exclude='.hg' --exclude='CVS' \
+            --exclude='.bzr' --exclude='_darcs' \
+            --exclude='app/EXO/EXO/Assets.xcassets/**' \
+            --exclude='dashboard/**' \
+            --exclude='docs/imgs/**' \
+            --exclude='packaging/dmg/background.png' \
+            --exclude='*.png' --exclude='*.jpg' --exclude='*.jpeg' --exclude='*.gif' --exclude='*.ico' \
+            --exclude='*.mp3' --exclude='*.wav' --exclude='*.mp4' --exclude='*.mov' \
+            .
+          if [ ! -s /tmp/source-code.tar.gz ]; then
+            echo "Error: source code tarball is missing or empty"
+            exit 1
+          fi
+          echo "Tarball created: $(wc -c < /tmp/source-code.tar.gz) bytes"
+          CODE_B64=$(base64 -w 0 /tmp/source-code.tar.gz)
+          printf '%s' "$CODE_B64" > /tmp/code_b64.txt
+      - name: Invoke NVIDIA review API
+        id: review
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_INTEGRATE_API_KEY }}
+        run: |
+          set -euo pipefail
+          CODE_B64=$(cat /tmp/code_b64.txt)
+          cat > /tmp/payload.json <<EOF
+          {
+            "model": "${MODEL}",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are an expert code reviewer. Analyze the supplied source code and return a unified diff (git-apply format) that fixes any bugs, security issues, or improvements you find. If no changes are needed, return an empty string."
+              },
+              {
+                "role": "user",
+                "content": "Here is the source code (base64-gzipped tarball):\n$CODE_B64"
+              }
+            ],
+            "temperature": 0.0,
+            "max_tokens": 4096
+          }
+          EOF
+          # Capture HTTP status code separately from response body
+          HTTP_STATUS=$(curl -s -X POST "$NVIDIA_ENDPOINT" \
+            -H "Authorization: Bearer $NVIDIA_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload.json \
+            -o /tmp/curl_body.txt \
+            -w "%{http_code}")
+          # Move the body to the expected response file
+          mv /tmp/curl_body.txt nvidia-response.json
+          echo "=== NVIDIA API Response (HTTP $HTTP_STATUS) ==="
+          cat nvidia-response.json
+          echo "=== End Response ==="
+          if [[ "$HTTP_STATUS" -ge 400 ]]; then
+            echo "API request failed with status $HTTP_STATUS"
+            exit 1
+          fi
+          DIFF=$(jq -r '.choices[0].message.content // empty' nvidia-response.json 2>/dev/null || echo "")
+          if [[ -z "$DIFF" ]]; then
+            DIFF=$(jq -r '.content // .text // .output // empty' nvidia-response.json 2>/dev/null || echo "")
+          fi
+          echo "$DIFF" > ai-suggested.diff
+          if [[ -z "$(echo "$DIFF" | sed 's/[[:space:]]//g')" ]]; then
+            echo "diff_empty=true" >> $GITHUB_OUTPUT
+          else
+            echo "diff_empty=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Apply AI-generated diff
+        if: steps.review.outputs.diff_empty == 'false'
+        id: apply
+        run: |
+          if git apply --whitespace=fix ai-suggested.diff; then
+            echo "Applied diff successfully."
+          else
+            git apply --reject ai-suggested.diff || true
+            if ls *.rej 2>/dev/null | grep -q .; then
+              echo "Some hunks were rejected – treating as no changes."
+              exit 1
+            fi
+          fi
+          if git diff --quiet; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Commit AI-suggested fixes
+        if: steps.apply.outputs.no_changes == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BRANCH="ai-review/${{ github.run_id }}"
+          git checkout -b $BRANCH
+          git add -u
+          git commit -m "chore: apply AI-suggested code fixes (run ${{ github.run_id }})"
+          git push origin $BRANCH
+      - name: Create PR from AI fixes
+        if: steps.apply.outputs.no_changes == 'false'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ai-review/${{ github.run_id }}
+          base: ${{ github.event.inputs.ref || github.ref }}
+          title: "🤖 AI-generated code review & fixes"
+          body: |
+            This PR was created automatically by the **AI Code Review & PR** workflow.
+            The model **${MODEL}** reviewed the source code and returned a unified diff, which was applied above.
+            View the full AI response: [nvidia-response.json](nvidia-response.json)
+          labels: |
+            ai-review
+            auto-fix
+          draft: false
